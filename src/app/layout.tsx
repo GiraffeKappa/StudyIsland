@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   description: "一點一滴，把努力種成一座島。",
   appleWebApp: { capable: true, statusBarStyle: "default", title: "讀書島" },
   manifest: "/manifest.webmanifest",
+  referrer: "no-referrer",
   icons: { icon: "/icon.svg", apple: "/apple-touch-icon.png" },
 };
 export const viewport: Viewport = {

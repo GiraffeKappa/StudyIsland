@@ -37,6 +37,12 @@ import {
   type Result,
 } from "@/lib/domain";
 import { UNITS } from "@/island/data";
+import {
+  accessRole,
+  accessKeys,
+  makeSession,
+  linksReady,
+} from "@/lib/link-access";
 export const runtime = "nodejs";
 const bodySchema = z.record(z.string(), z.unknown());
 async function handle(req: Request, action: string) {
@@ -47,12 +53,28 @@ async function handle(req: Request, action: string) {
   if (action === "config")
     return {
       cloud: configured(),
+      access: linksReady(),
       demo: demoAllowed(),
       ai: aiConfigured(),
       provider: "Gemini",
       model: process.env.GEMINI_MODEL || null,
       dailyLimit: Number(process.env.AI_DAILY_REQUEST_LIMIT || 30),
     };
+  if (action === "access") {
+    if (!configured() || !linksReady())
+      throw new HttpError(503, "家庭連結服務尚未設定");
+    const token = z.string().max(150).parse(body.token),
+      role = accessRole(token);
+    if (!role) throw new HttpError(403, "這個家庭連結無效或已更換");
+    (await cookies()).set("island-access", makeSession(role), {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 365 * 86400,
+    });
+    return { ok: true };
+  }
   if (action === "demo") {
     if (!demoAllowed()) throw new HttpError(403, "正式環境不開放本機示範");
     (await cookies()).set("island-demo", "local-student", {
@@ -64,11 +86,21 @@ async function handle(req: Request, action: string) {
   }
   if (action === "logout") {
     (await cookies()).delete("island-demo");
+    (await cookies()).delete("island-access");
     return { ok: true };
   }
   const readOnly = ["me", "state", "children"].includes(action);
   const who = await identity(req, !readOnly);
   if (action === "me") return who;
+  if (action === "family-links") {
+    if (who.demo) throw new HttpError(503, "示範不提供跨裝置家庭連結");
+    const keys = accessKeys(),
+      origin = process.env.SITE_ORIGIN || new URL(req.url).origin;
+    return {
+      student: origin + "/island/" + keys.student,
+      parent: origin + "/island/" + keys.parent,
+    };
+  }
   if (action === "children") {
     if (who.role !== "parent") return [];
     const links = await checked(

@@ -16,16 +16,18 @@ pnpm dev
 
 示範的伺服器資料保存在忽略上傳的 `.local/demo.json`；裝置快取、草稿與 outbox 使用 IndexedDB。示範不是正式登入，正式 `pnpm build`／`pnpm start` 不開放示範身份。
 
-## Supabase 與帳號
+## 免帳號家庭連結（目前正式流程）
 
-1. 自行選擇 Supabase 專案，依序執行 `supabase/migrations/001_island.sql`、`002_reports.sql`、`003_ai_settings.sql`。亦可使用 Supabase CLI 對已連結的專案執行 migrations。這些操作會改動目標資料庫，應先核對目標專案；本次沒有建立或修改外部專案。
-2. 在 `.env.local` 填入 `NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY` 與伺服器專用 `SUPABASE_SERVICE_ROLE_KEY`。公開連線金鑰使用 anon/publishable key，**不能拿 service-role key 代替**。
-3. 執行 `pnpm seed` 匯入九科原概念單元與關聯。出版社對照僅建立未核對資料，不會填入猜測的版次／頁碼。
-4. 在 Supabase Auth 啟用 Email/password，設定正式 Site URL、允許的確認信返回網址與郵件服務。建立獨立學生、家長帳號；需確認信時，確認後再登入。角色於首次建帳時建立，客戶端沒有修改角色的權限。
-5. 學生於收藏／設定產生一次性邀請碼；家長從「家長摘要」貼上。邀請使用 192-bit 隨機 token，資料庫只存雜湊，有效 15 分鐘且一次使用。不能填學生 ID 直接取得資料。
-6. 家長只能讀取已配對學生資料，可於設定管理自己的 AI 啟用狀態、允許模型與每日次數，不可修改學生學習資料。
+不需要註冊、Email 或密碼。公開首頁直接顯示原風格島嶼，個人紀錄只在家庭專屬連結載入。
 
-所有學習寫入都走伺服器驗證。資料庫 RLS 只允許學生本人與已配對家長讀取；客戶端角色沒有直接寫入學習表、角色表或配對表的權限。`question_solutions` 不授予學生／家長查詢權限。Service-role 金鑰只有伺服器持有，RPC 不開放給 anon/authenticated。
+1. 依序執行 `supabase/migrations/001_island.sql`、`002_reports.sql`、`003_ai_settings.sql`、`004_family_links.sql`，然後執行教材 seed。第四份 migration 保留學習紀錄，將學生／家長改為內部識別資料，不建立登入帳號；若舊資料已有多個學生，會停止要求明確選擇。
+2. 伺服器設定 `NEXT_PUBLIC_SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY`。後者可填 Supabase 現有 Secret key，只能存伺服器環境，不需前端 anon key。
+3. 設定 `STUDENT_ACCESS_KEY`、`PARENT_ACCESS_KEY`：兩個不同、至少 32 字元的密碼學隨機值，建議使用 32 bytes base64url。不可放 NEXT_PUBLIC、Git、日誌或公開文件。
+4. 女兒開啟 `/island/<STUDENT_ACCESS_KEY>`，家長開啟 `/island/<PARENT_ACCESS_KEY>`。裝置會以簽署的 HttpOnly / Secure cookie 記住權限。家長連結的直接 API 寫入也會被拒絕。
+5. 各自把專屬連結加入主畫面。專屬 manifest 會保留入口，即使 iOS PWA 與 Safari 的儲存隔離，也能重新辨識裝置；實體 Safari 仍需補驗。
+6. 女兒可從收藏／設定複製家長只讀連結。這些連結具存取權，請私下保存；更換伺服器兩個連結值會使舊連結及裝置憑證失效。
+
+所有資料表仍啟用 RLS；瀏覽器不直接寫 Supabase，所有學習寫入均經伺服器驗證。解答表不對瀏覽器開放，家長只讀只限已連結的家庭。這版服務單一家庭，並非公開多家庭註冊系統。
 
 ## Gemini 設定
 
@@ -50,7 +52,7 @@ AI_DAILY_REQUEST_LIMIT=30
 
 ## 產品行為
 
-- 登入與首次設定後直接回到島。可切換 3D／2D、動畫，操作角色與活動動態、查看應援卡、抽複習、查看各科小鎮與跨科關聯。
+- 家庭連結開啟後直接回到島，學校進度可於設定調整。可切換 3D／2D、動畫，操作角色與活動動態、查看應援卡、抽複習、查看各科小鎮與跨科關聯。
 - 熟悉程度為尚未評估／不太會／大致會／很熟；自評決定單元建築。投入分鐘、任務狀態、練習結果與裝飾各自獨立，AI 不會降低自評。
 - 今日任務可記部分投入，也可明確完成這次任務；讀過不等於讀完整個單元。改期保留紀錄並檢查任務版本與已確認可用時間。
 - 平日額外複習預設 0，週末各預填 180 分鐘，請每週改成實際可用時間。每日三題數學約 15 分鐘另列，不占用作業的一小時。超量一般複習不能套用。
@@ -63,11 +65,11 @@ AI_DAILY_REQUEST_LIMIT=30
 
 ## 離線、同步與登出
 
-正式 build 註冊 Service Worker，快取公開外殼與載入的靜態資產，預抓首頁所需腳本／CSS；API 與帶 Authorization 的請求不進 Cache Storage。已登入且曾載入的身份能從 IndexedDB 看任務、保存手填／計時紀錄與作答草稿。AI 出題、批改、配對需網路。
+正式 build 註冊 Service Worker，快取公開外殼與載入的靜態資產，預抓首頁所需腳本／CSS；API 與帶 Authorization 的請求不進 Cache Storage。已透過家庭連結且曾載入的裝置能從 IndexedDB 看任務、保存手填／計時紀錄與作答草稿。AI 出題、批改、配對需網路。
 
 開啟、恢復網路、回到前景或按同步狀態時同步。事件 UUID 去重；伺服器交易檢查整體 revision，任務檢查版本。衝突不靜默覆蓋，原提案保留於收藏／設定，可核對後從任務或週計畫重新操作。未同步不能宣稱已上傳。家長摘要顯示最後雲端同步時間。
 
-登出會清除此帳號所有孩子的 IndexedDB 快取與身份提示；Service Worker 只保留公開外殼，不保留學生 API。瀏覽器儲存可能被系統清除，重要資料仍應連線同步，亦可匯出裝置 JSON 備份；目前匯出檔供檢視與人工復原，沒有一鍵匯入介面。
+「清除此裝置資料」會清除該身份的 IndexedDB 快取與裝置提示；Service Worker 只保留公開外殼，不保留學生 API。瀏覽器儲存可能被系統清除，重要資料仍應連線同步，亦可匯出裝置 JSON 備份；目前匯出檔供檢視與人工復原，沒有一鍵匯入介面。
 
 ## PWA 安裝與部署
 
@@ -80,7 +82,7 @@ pnpm start
 
 使用支援 Node.js 的 Next.js 主機，自行設定相同環境變數、正式 HTTPS 網址與 `SITE_ORIGIN`。此專案包含動態 API，**不能直接部署成 GitHub Pages 靜態網站**。不要把 `.env.local`、`.local` 或私密金鑰放入 GitHub。GitHub 建議先用私人 repository；本次沒有推送或公開部署。
 
-部署並設定 Auth 後，在 iPad Safari 用 HTTPS 網址開啟，分享 → 加入主畫面。首次連線待外殼與資料載入後再測離線。Manifest 有橫式偏好，但不假設瀏覽器可鎖定方向。手機直式亦有可捲動版面；輸入時使用 visualViewport 避讓鍵盤。
+部署並設定家庭連結後，在 iPad Safari 用 HTTPS 網址開啟，分享 → 加入主畫面。首次連線待外殼與資料載入後再測離線。Manifest 有橫式偏好，但不假設瀏覽器可鎖定方向。手機直式亦有可捲動版面；輸入時使用 visualViewport 避讓鍵盤。
 
 參考：[Next.js PWA](https://nextjs.org/docs/app/guides/progressive-web-apps)、[Supabase RLS](https://supabase.com/docs/guides/database/postgres/row-level-security)。
 

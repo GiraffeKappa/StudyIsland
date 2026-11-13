@@ -14,7 +14,7 @@ import {
   IDOL_CHIBI,
 } from "@/island/art";
 import { IslandWorld3D, IslandTown, bookLabel } from "@/island/worlds";
-import { api, auth } from "@/lib/client";
+import { api } from "@/lib/client";
 import {
   readState,
   writeState,
@@ -47,6 +47,7 @@ import {
 import katex from "katex";
 type User = { id: string; role: "student" | "parent"; demo: boolean };
 type Config = {
+  access?: boolean;
   cloud: boolean;
   demo: boolean;
   ai: boolean;
@@ -114,6 +115,7 @@ function Button({
   );
 }
 export default function StudyIsland() {
+  const [setupOpen, setSetupOpen] = useState(false);
   const [visualHeight, setVisualHeight] = useState<number | null>(null);
   useEffect(() => {
     const v = window.visualViewport;
@@ -177,7 +179,7 @@ export default function StudyIsland() {
   }
   function emit(events: Event[]) {
     events = events.map((e) => eventSchema.parse(e));
-    if (readOnly) throw Error("家長帳號只能查看");
+    if (readOnly) throw Error("家長連結只能查看");
     const s = stateRef.current;
     const all = [...s.events];
     for (const e of events) {
@@ -230,31 +232,43 @@ export default function StudyIsland() {
     userRef.current = u;
     setUser(u);
     localStorage.setItem("island-last-identity", JSON.stringify(u));
-    let c = "";
+    let c =
+      u.role === "parent"
+        ? JSON.parse(localStorage.getItem("island-last-child") || "null") || ""
+        : "";
     if (u.role === "parent" && navigator.onLine) {
       const cs = await api("children");
       setChildren(cs);
       c = cs[0]?.id || "";
       childRef.current = c;
       setChild(c);
+      localStorage.setItem("island-last-child", JSON.stringify(c));
     }
+    childRef.current = c;
+    setChild(c);
     const cached = await readState(cacheKey(u, c));
     store(cached);
     setReady(true);
     setNotice("");
-    setPanel(u.role === "parent" ? "parent" : null);
+    setPanel(null);
     void synchronize();
   }
   useEffect(() => {
     mounted.current = true;
     setOnline(navigator.onLine);
     void (async () => {
+      const token = window.location.pathname.match(
+        /^\/island\/([^/]+)\/?$/,
+      )?.[1];
       try {
         const c = await api<Config>("config");
         setConfig(c);
         try {
+          if (token) await api("access", { token: decodeURIComponent(token) });
+          else if (c.demo && !c.cloud) await api("demo", {});
           await enter(await api<User>("me"));
-        } catch {
+        } catch (e) {
+          if (token) setNotice((e as Error).message);
           setReady(true);
         }
       } catch {
@@ -277,35 +291,12 @@ export default function StudyIsland() {
       void navigator.serviceWorker
         .register("/sw.js")
         .catch(() => setNotice("離線外殼尚未快取，請保持連線後重試。"));
-    const { data: subscription } = auth()?.auth.onAuthStateChange(
-      (event, session) => {
-        if (
-          event === "SIGNED_OUT" &&
-          userRef.current &&
-          !userRef.current.demo
-        ) {
-          const old = userRef.current.id;
-          void saveQueue.current.then(() => clearIdentity(old));
-          localStorage.removeItem("island-last-identity");
-          setUser(null);
-          userRef.current = null;
-          setState(emptyState());
-        }
-        if (event === "SIGNED_IN" && session && !userRef.current)
-          queueMicrotask(() => {
-            void api<User>("me")
-              .then(enter)
-              .catch((e) => setNotice(e.message));
-          });
-      },
-    ) || { data: null };
     return () => {
       mounted.current = false;
       clearInterval(id);
       window.removeEventListener("online", wake);
       window.removeEventListener("offline", wake);
       document.removeEventListener("visibilitychange", wake);
-      subscription?.subscription.unsubscribe();
     };
   }, []);
   useEffect(() => {
@@ -382,11 +373,12 @@ export default function StudyIsland() {
     await clearIdentity(userRef.current!.id);
     localStorage.removeItem("island-last-identity");
     await api("logout", {}).catch(() => {});
-    await auth()?.auth.signOut();
+    localStorage.removeItem("island-last-child");
     userRef.current = null;
     setUser(null);
     setState(emptyState());
     setPanel(null);
+    window.location.assign("/");
   }
   const worldProps = {
     progress,
@@ -411,16 +403,7 @@ export default function StudyIsland() {
         <p>正在讓島嶼醒來…</p>
       </main>
     );
-  if (!user)
-    return (
-      <Login
-        config={config}
-        busy={busy}
-        work={work}
-        enter={enter}
-        notice={notice}
-      />
-    );
+  if (!user) return <GuestIsland notice={notice} />;
   return (
     <main
       style={visualHeight ? { height: visualHeight } : undefined}
@@ -904,19 +887,24 @@ export default function StudyIsland() {
                 </div>
                 <p className="muted">熟悉程度降低，也不會收回努力裝飾。</p>
                 <h3>我的小島設定</h3>
+                {!readOnly && (
+                  <Button secondary onClick={() => setSetupOpen(true)}>
+                    調整各科學校進度
+                  </Button>
+                )}
                 <SettingsForm
                   key={p.prefs.name + p.prefs.character}
                   prefs={p.prefs}
                   save={preferences}
                   disabled={readOnly}
                 />
-                <h3>帳號與連線</h3>
+                <h3>裝置與連線</h3>
                 <p>
                   {readOnly
-                    ? "家長帳號 · 學習資料只讀"
+                    ? "家長連結 · 學習資料只讀"
                     : user.demo
-                      ? "本機示範，沒有真實登入"
-                      : "學生帳號"}
+                      ? "本機示範，僅保存在本機"
+                      : "學生連結"}
                   <br />
                   最後雲端同步：
                   {state.lastSync
@@ -931,12 +919,13 @@ export default function StudyIsland() {
                     secondary
                     onClick={() =>
                       void work(async () => {
-                        const v = await api("invite", {});
-                        setNotice(`家長邀請碼：${v.token}（${v.expires}）`);
+                        const v = await api("family-links", {});
+                        await navigator.clipboard.writeText(v.parent);
+                        setNotice("已複製家長只讀連結，可貼到你的手機開啟。");
                       })
                     }
                   >
-                    產生家長一次性配對碼
+                    複製家長只讀連結
                   </Button>
                 )}
                 <h3>Gemini 服務設定</h3>
@@ -975,7 +964,7 @@ export default function StudyIsland() {
                 </Button>
                 <div className="spacer" />
                 <Button secondary onClick={() => void work(logout)}>
-                  登出並清除此身份裝置快取
+                  清除此裝置資料並返回公開島嶼
                 </Button>
                 {state.conflicts.length > 0 && (
                   <>
@@ -1012,7 +1001,7 @@ export default function StudyIsland() {
                 <h2>陪她看見自己的努力</h2>
                 <p className="muted">只讀檢視 · 只顯示已同步資料</p>
                 <label>
-                  已配對的孩子
+                  已連結的孩子
                   <select
                     value={child}
                     onChange={(e) =>
@@ -1025,7 +1014,7 @@ export default function StudyIsland() {
                       })
                     }
                   >
-                    <option value="">尚未配對</option>
+                    <option value="">尚未載入家庭資料</option>
                     {children.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.nickname || "孩子"}
@@ -1033,20 +1022,6 @@ export default function StudyIsland() {
                     ))}
                   </select>
                 </label>
-                <PairForm
-                  onPair={(token) =>
-                    void work(async () => {
-                      await api("pair", { token });
-                      const cs = await api("children");
-                      setChildren(cs);
-                      if (cs.length) {
-                        childRef.current = cs[0].id;
-                        setChild(cs[0].id);
-                        await synchronize();
-                      }
-                    })
-                  }
-                />
                 <p>
                   最後同步：
                   {state.lastSync
@@ -1124,156 +1099,123 @@ export default function StudyIsland() {
           </div>
         </div>
       )}
-      {!p.prefs.onboarded && !readOnly && (
-        <Onboarding prefs={p.prefs} save={preferences} />
+      {setupOpen && !readOnly && (
+        <Onboarding
+          prefs={p.prefs}
+          save={(update) => {
+            preferences(update);
+            setSetupOpen(false);
+          }}
+        />
       )}
     </main>
   );
 }
 
-function Login({
-  config,
-  busy,
-  work,
-  enter,
-  notice,
-}: {
-  config: Config | null;
-  busy: boolean;
-  work: (fn: () => Promise<unknown>) => Promise<void>;
-  enter: (u: User) => Promise<void>;
-  notice: string;
-}) {
-  const [email, setEmail] = useState(""),
-    [password, setPassword] = useState(""),
-    [role, setRole] = useState("student"),
-    [signup, setSignup] = useState(false),
-    [message, setMessage] = useState("");
+function GuestIsland({ notice }: { notice: string }) {
+  const [mode, setMode] = useState<"3d" | "2d">("3d"),
+    [selected, setSelected] = useState("math"),
+    [info, setInfo] = useState(false),
+    [card, setCard] = useState("");
+  const props = {
+    progress: Object.fromEntries(ISLANDS.map((i) => [i.id, 0])),
+    selected,
+    hits: new Set<string>(),
+    motion: true,
+    bubbleNow: null,
+    reacting: "",
+    idolsOn: ["許光漢", "曾敬驊", "沈伯洋", "周杰倫"],
+    onPick: (id: string) => {
+      setSelected(id);
+      setInfo(true);
+    },
+    onPoke: (id: string) => {
+      const c = crewByKind(Number(id.replace("crew-", "")));
+      setCard(c ? pick(c.lines) : pick(TALK));
+    },
+  };
   return (
-    <main className="login-page">
-      <div className="login-art">
-        <span>WELCOME TO YOUR LITTLE WORLD</span>
-        <h1>
-          一點一滴，
-          <br />
-          讀成自己的島。
-        </h1>
-        <Mascot size={170} />
-        <p>
-          九座島，一起慢慢長大。
-          <br />
-          臭凝會考讀書島
-        </p>
-      </div>
-      <section className="login-form">
-        <span className="eyebrow">STUDY ISLAND</span>
-        <h2>{signup ? "開始一段新的冒險" : "歡迎回到島上"}</h2>
-        <p>學生記錄努力，家長陪伴成長。</p>
-        {config?.cloud ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void work(async () => {
-                const sb = auth()!;
-                if (signup) {
-                  const r = await sb.auth.signUp({
-                    email,
-                    password,
-                    options: {
-                      data: {
-                        role,
-                        nickname: role === "student" ? "臭凝" : "家長",
-                      },
-                    },
-                  });
-                  if (r.error) throw r.error;
-                  if (!r.data.session) {
-                    setMessage("請到信箱確認帳號後再登入。");
-                    return;
-                  }
-                } else {
-                  const r = await sb.auth.signInWithPassword({
-                    email,
-                    password,
-                  });
-                  if (r.error) throw r.error;
-                }
-                await enter(await api("me"));
-              });
-            }}
-          >
-            <label>
-              電子郵件
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </label>
-            <label>
-              密碼
-              <input
-                type="password"
-                autoComplete={signup ? "new-password" : "current-password"}
-                minLength={8}
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </label>
-            {signup && (
-              <label>
-                帳號身份
-                <select value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="student">學生</option>
-                  <option value="parent">家長（學習資料只讀）</option>
-                </select>
-              </label>
-            )}
-            <button className="button" disabled={busy}>
-              {busy ? "處理中…" : signup ? "建立帳號" : "登入讀書島 →"}
-            </button>
-            <button
-              type="button"
-              className="text-button"
-              onClick={() => setSignup(!signup)}
-            >
-              {signup ? "已有帳號，前往登入" : "第一次來？建立獨立帳號"}
-            </button>
-          </form>
+    <main className="island-app">
+      <style>{CSS}</style>
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">島</span>
+          <span>
+            <b>臭凝的讀書島</b>
+            <small>STUDY A LITTLE, GROW A LITTLE</small>
+          </span>
+        </div>
+        <span className="sync-state">公開島嶼預覽</span>
+      </header>
+      <div className="world-area">
+        {mode === "3d" ? (
+          <IslandWorld3D {...props} onFail={() => setMode("2d")} />
         ) : (
-          <div className="empty">
-            <p>雲端帳號服務尚未設定。</p>
-            <small>
-              本機示範可驗證地圖、排程與保存；不會假裝同步到其他裝置。
-            </small>
+          <div className="world-2d">
+            <IslandWorld {...props} />
           </div>
         )}
-        {config?.demo && (
-          <Button
-            secondary
-            disabled={busy}
-            onClick={() =>
-              void work(async () => {
-                await api("demo", {});
-                await enter(await api("me"));
-              })
-            }
-          >
-            進入本機示範 →
-          </Button>
-        )}
-        <p role="status" className="error">
-          {notice || message}
-        </p>
-        <small>以 Asia/Taipei 記錄每一天 · 不發送推播</small>
-      </section>
+        <div className="island-caption">
+          <span>YOUR LITTLE WORLD</span>
+          <h1>每一點努力，都會長大。</h1>
+          <p>不需註冊或登入 · 用家庭專屬連結載入讀書紀錄</p>
+        </div>
+        <div className="map-switch">
+          <button onClick={() => setMode(mode === "3d" ? "2d" : "3d")}>
+            {mode === "3d" ? "切換 2D" : "切換 3D"}
+          </button>
+        </div>
+      </div>
+      <nav className="dock">
+        <button onClick={() => setInfo(!info)}>
+          <span>☀</span>認識讀書島
+        </button>
+      </nav>
+      {notice && (
+        <div className="notice" role="status">
+          {notice}
+        </div>
+      )}
+      {info && (
+        <aside className="panel" role="dialog" aria-label="認識讀書島">
+          <div className="panel-heading">
+            <span className="eyebrow">YOUR LITTLE WORLD</span>
+            <button onClick={() => setInfo(false)} aria-label="關閉面板">
+              ×
+            </button>
+          </div>
+          <div className="panel-scroll">
+            <h2>{ISLANDS.find((i) => i.id === selected)?.name}</h2>
+            <p>
+              不需要帳號密碼。女兒使用讀書連結，家長使用只讀連結，打開就回到這座島。
+            </p>
+            <p className="muted">
+              此處是公開預覽，不會顯示或修改家庭紀錄。專屬連結可加入主畫面，不要轉貼到公開場所。
+            </p>
+            <IslandTown
+              island={ISLANDS.find((i) => i.id === selected)!}
+              units={UNITS.filter((u) => u.island === selected)}
+              level={() => 0}
+              selected=""
+              onPick={(id) => setCard(unitName(id) + " · 出版社章節待核對")}
+              motion={true}
+              progress={0}
+            />
+          </div>
+        </aside>
+      )}
+      {card && (
+        <div className="card-shade" onClick={() => setCard("")}>
+          <div className="cheer-card">
+            <Mascot size={80} />
+            <p>{card}</p>
+            <Button onClick={() => setCard("")}>收下這份加油</Button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
-
 function MasterySummary({
   mastery,
   ids,
@@ -1789,7 +1731,8 @@ function MathPanel({
           </h3>
           <p className="muted">{question.verification}</p>
           {!result && !readOnly && (
-            <form className="answer-form"
+            <form
+              className="answer-form"
               onSubmit={(e) => {
                 e.preventDefault();
                 void work(async () => {
@@ -2517,29 +2460,6 @@ function SettingsForm({
     </form>
   );
 }
-function PairForm({ onPair }: { onPair: (token: string) => void }) {
-  const [token, setToken] = useState("");
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        onPair(token);
-      }}
-    >
-      <label>
-        貼上孩子產生的一次性邀請碼
-        <input
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          autoComplete="off"
-        />
-      </label>
-      <button disabled={!token.trim()} className="button secondary">
-        安全配對
-      </button>
-    </form>
-  );
-}
 function AISettings({
   work,
 }: {
@@ -2563,7 +2483,7 @@ function AISettings({
         e.preventDefault();
         void work(async () => {
           await api("ai-settings", data.settings);
-          setMessage("已儲存自己的 AI 服務設定，僅對已配對孩子生效。");
+          setMessage("已儲存自己的 AI 服務設定，僅對已連結孩子生效。");
         });
       }}
     >
@@ -2614,7 +2534,7 @@ function AISettings({
             })
           }
         />
-        啟用已配對孩子的 Gemini 功能
+        啟用已連結孩子的 Gemini 功能
       </label>
       <button disabled={!data.allowed.length} className="button secondary">
         儲存我的 AI 設定

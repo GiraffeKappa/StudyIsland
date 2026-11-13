@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
+import { sessionRole } from "./link-access";
 import {
   type Event,
   type Question,
@@ -24,8 +25,7 @@ export class HttpError extends Error {
 }
 export const configured = () =>
   !!(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY &&
+    (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL) &&
     process.env.SUPABASE_SERVICE_ROLE_KEY
   );
 export const demoAllowed = () =>
@@ -35,7 +35,7 @@ export const demoAllowed = () =>
 export function admin() {
   if (!configured()) throw new HttpError(503, "Supabase 尚未設定");
   return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { persistSession: false, autoRefreshToken: false } },
   );
@@ -58,20 +58,21 @@ export async function identity(
       role: "student",
       demo: true,
     };
-  const token = request.headers.get("authorization")?.replace(/^Bearer /, "");
-  if (!token) throw new HttpError(401, "請先登入");
+  const role = sessionRole((await cookies()).get("island-access")?.value || "");
+  if (!role) throw new HttpError(401, "請使用家庭專屬連結開啟");
+  if (write && role !== "student") throw new HttpError(403, "家長連結只能查看");
   const db = admin();
-  const { data, error } = await db.auth.getUser(token);
-  if (error || !data.user) throw new HttpError(401, "登入已失效，請重新登入");
-  const { data: p, error: pe } = await db
-    .from("profiles")
-    .select("role")
-    .eq("id", data.user.id)
+  const { data: family, error } = await db
+    .from("family_access")
+    .select("student_id,parent_id")
+    .eq("singleton", true)
     .single();
-  if (pe || !p) throw new HttpError(403, "找不到有效身份");
-  if (write && p.role !== "student")
-    throw new HttpError(403, "家長帳號只能查看");
-  return { id: data.user.id, role: p.role, demo: false };
+  if (error || !family) throw new HttpError(503, "家庭資料尚未完成設定");
+  return {
+    id: role === "student" ? family.student_id : family.parent_id,
+    role,
+    demo: false,
+  };
 }
 export async function studentFor(who: Identity, requested?: string) {
   if (who.role === "student") {
@@ -79,7 +80,7 @@ export async function studentFor(who: Identity, requested?: string) {
       throw new HttpError(403, "無法存取其他學生");
     return who.id;
   }
-  if (!requested) throw new HttpError(400, "請選擇已配對的孩子");
+  if (!requested) throw new HttpError(400, "請選擇已連結的孩子");
   const { data } = await admin()
     .from("guardian_links")
     .select("student_id")
