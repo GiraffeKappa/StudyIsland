@@ -313,6 +313,7 @@ pre {
   border: 1px solid #ffffff50;
 }
 .world-area .g3-btns {
+  top: auto;
   bottom: 110px;
   right: 24px;
 }
@@ -1471,4 +1472,10 @@ pre {
     scroll-behavior: auto !important;
     transition: none !important;
   }
+}
+@media (max-height: 320px) and (orientation: landscape) {
+  .answer-form {display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:10px;align-items:end;margin:12px 0;}
+  .answer-form label {margin:0;min-width:0;}
+  .answer-form>small {display:none;}
+  .answer-form .submit-answer {position:static;margin:0;font-size:11px;line-height:1.5;padding:8px;width:140px;}
 }

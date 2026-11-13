@@ -1,0 +1,9 @@
+node_modules/
+.pnpm-store/
+.next/
+.env*
+!.env.example
+.local/
+test-results/
+*.tsbuildinfo
+study-island-source.zip

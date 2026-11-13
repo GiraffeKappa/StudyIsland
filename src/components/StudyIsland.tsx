@@ -1789,7 +1789,7 @@ function MathPanel({
           </h3>
           <p className="muted">{question.verification}</p>
           {!result && !readOnly && (
-            <form
+            <form className="answer-form"
               onSubmit={(e) => {
                 e.preventDefault();
                 void work(async () => {

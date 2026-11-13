@@ -8,7 +8,9 @@
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "node --env-file=.env.local --import tsx scripts/seed.ts",
+    "test:api": "node scripts/api-smoke.mjs",
+    "icons": "node scripts/icons.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.80.0",
